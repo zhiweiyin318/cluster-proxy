@@ -1,11 +1,16 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"crypto/x509"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	certutil "k8s.io/client-go/util/cert"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -313,7 +318,15 @@ func GetClusterProxyValueFunc(
 		if err != nil {
 			return nil, err
 		}
-
+		proxyCaCert := "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURBekNDQWV1Z0F3SUJBZ0lVV1J3Q29yYTFHcTcrVjlnOUN6L3VJVy9aaXQwd0RRWUpLb1pJaHZjTkFRRUwKQlFBd01URVdNQlFHQTFVRUNnd05UM0JsYmxOb2FXWjBJRUZEVFRFWE1CVUdBMVVFQXd3T2QzZDNMbkpsWkdoaApkQzVqYjIwd0hoY05Nak14TVRFeU1UTXlNelF3V2hjTk1qUXhNVEV4TVRNeU16UXdXakF4TVJZd0ZBWURWUVFLCkRBMVBjR1Z1VTJocFpuUWdRVU5OTVJjd0ZRWURWUVFEREE1M2QzY3VjbVZrYUdGMExtTnZiVENDQVNJd0RRWUoKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTkM4dVdweHJOZCtWYm5IZXBBSWMyOS9lTXRJRndQNQp6TUd6V0hSTlltOHhyOWhhODV6NzY0eGpIcjJaQ0swRmNCblFyWkJrK1E5ZjZJT3lmelk1L29oY3dsTWhsOTh4CldqSHhHU01KNEl6KzlKbmZYVk9LbVFKMkY1S2ZPMWNock14cnNWZ3FsUTZHWnJYRDkxREZiK3V2U1BDa09oTFIKVC9zdHBlWGlxK1lERmt4c2U1V0Zqb29OZ2R1L1FZbHFDUE1HWlVsdkxwN1JmdlluZjgxalF3azZONXNpVDNYYQovUmFCbFA3dEI3aVNpV3BYbllQK0lkZFlzUkx4YlYzN1JWT2ZKQ0UvZHkyam1QQXRXdG0zcmpWajhoQ3g4d0l2Cm1XQnBUVzJoUFpiOEtxNk9YMkg2MC82OGVhVG8waDdMb1FJZStZdFlzcVkyQ2RtL2NhMlphQjBDQXdFQUFhTVQKTUJFd0R3WURWUjBSQkFnd0JvY0VDZ0IySlRBTkJna3Foa2lHOXcwQkFRc0ZBQU9DQVFFQVZzTWhsYWhZR1FKQQpZOWZIUWtzQzlQcjJQMnh1bWM3dVlpVTdBYStUVHdqUDVBYWFmeWNIa04wa2RsK0krUWhVWVBIMzQvY0t6N2w5CnJRUUdsaHVJQjFqQjhleEZaTCtyNENHc205bWxhVHRzUlJiSXlBbCt5S1h0VXBIRnY2aGlkQkdxajRxUm1KcW0KK1lIRGw2QWF1NW1XRmZnNnZiN1NWc3FicGU0dU9LaDR6MmRPWU1SdTM4SjNRV1JQQ0pCNi9BUGc2VDRwMEtzdApWSWxvbFJmWkJxbnpTUFF0SUZNQXk3MlVaNVM4N0NBQ1pQVkpGUCsxSjYrcUdNU3U3b3pxNjV0SXZkWTRDTjdxCnVrQWQ5ckZXU0lKS3dUNkUwckZkRjR3ZHR4bWNNallUMHlPUGY4aXJjY0FNRllQakpSUWtSSGJjSFVLQXNFdXIKV2hZb2RaTEs2QT09Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0="
+		rawProxyCaCert, err := base64.StdEncoding.DecodeString(proxyCaCert)
+		if err != nil {
+			return nil, fmt.Errorf("faield to decdoe proxy ca. %v", err)
+		}
+		caCert, err := mergeCertificateData(rawProxyCaCert, caCertData)
+		if err != nil {
+			return nil, err
+		}
 		values := map[string]interface{}{
 			"agentDeploymentName":           "cluster-proxy-proxy-agent",
 			"serviceDomain":                 serviceDomain,
@@ -327,7 +340,7 @@ func GetClusterProxyValueFunc(
 			"proxyAgentImage":               clusterProxyAddonImage,
 			"proxyAgentImagePullSecrets":    proxyConfig.Spec.ProxyAgent.ImagePullSecrets,
 			"replicas":                      proxyConfig.Spec.ProxyAgent.Replicas,
-			"base64EncodedCAData":           base64.StdEncoding.EncodeToString(caCertData),
+			"base64EncodedCAData":           base64.StdEncoding.EncodeToString(caCert),
 			"serviceEntryPoint":             serviceEntryPoint,
 			"serviceEntryPointPort":         serviceEntryPointPort,
 			"agentDeploymentAnnotations":    annotations,
@@ -351,6 +364,15 @@ func GetClusterProxyValueFunc(
 			values["nodeSelector"] = nodeSelector
 		}
 
+		addonAnnotations := addon.GetAnnotations()
+		if len(addonAnnotations) == 0 {
+			return values, nil
+		}
+		values["proxyConfig"] = map[string]string{
+			"HTTP_PROXY":  addonAnnotations["HTTP_PROXY"],
+			"HTTPS_PROXY": addonAnnotations["HTTPS_PROXY"],
+			"NO_PROXY":    addonAnnotations["NO_PROXY"],
+		}
 		return values, nil
 	}
 }
@@ -498,4 +520,43 @@ func getServerCertificatesFromSecret(nativeClient kubernetes.Interface, secretNa
 		return nil, nil, fmt.Errorf("secret %s does not contain tls.key", ServerCertSecretName)
 	}
 	return key, cert, nil
+}
+
+func mergeCertificateData(caBundles ...[]byte) ([]byte, error) {
+	var all []*x509.Certificate
+	for _, caBundle := range caBundles {
+		if len(caBundle) == 0 {
+			continue
+		}
+
+		certs, err := certutil.ParseCertsPEM(caBundle)
+		if err != nil {
+			return []byte{}, err
+		}
+		all = append(all, certs...)
+	}
+
+	// remove duplicated cert
+	var merged []*x509.Certificate
+	for i := range all {
+		found := false
+		for j := range merged {
+			if reflect.DeepEqual(all[i].Raw, merged[j].Raw) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			merged = append(merged, all[i])
+		}
+	}
+
+	// encode the merged certificates
+	b := bytes.Buffer{}
+	for _, cert := range merged {
+		if err := pem.Encode(&b, &pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}); err != nil {
+			return []byte{}, err
+		}
+	}
+	return b.Bytes(), nil
 }
